@@ -1,0 +1,612 @@
+#include <Wire.h> 
+
+#include <Adafruit_RGBLCDShield.h> 
+
+#include <utility/Adafruit_MCP23017.h> 
+
+Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
+
+byte upArrow[8] = {
+  0b00000,
+  0b00100,
+  0b01110,
+  0b11111,
+  0b11111,
+  0b00100,
+  0b00100,
+  0b00100
+};
+byte downArrow[8] = {
+  0b00100,
+  0b00100,
+  0b00100,
+  0b00100,
+  0b11111,
+  0b11111,
+  0b01110,
+  0b00100
+};
+
+bool syncComplete = false;
+bool showStudentID = false;
+
+uint8_t accountCount=0;
+uint8_t currentAccountIndex = 0;
+const int MAX_ACCOUNTS = 20;
+
+const unsigned holdDuration = 1000;
+const unsigned long scrollDelay=500;
+unsigned long scrollTime = 0;
+unsigned long selectButtonHeldTime = 0;
+unsigned long Rtiming = 0;
+int offset = 0;
+
+String currentJobTitle = "";
+
+struct payrollAccount{
+  String ID;
+  int jobGrade;
+  String jobTitle;
+  float salary=0.0;
+  String pensionStat= "PEN";
+};
+
+
+payrollAccount accounts[MAX_ACCOUNTS];
+
+void setup() {
+  
+  Serial.begin(9600);
+  lcd.begin(16,2);
+  lcd.setBacklight(3);
+
+}
+
+
+void loop() {
+   uint8_t buttons = lcd.readButtons();
+
+
+  if (!syncComplete) {
+    sendR();
+   
+  }
+  else{
+    
+    processSerialCommands();
+    
+  }
+  if (buttons & BUTTON_UP && currentAccountIndex > 0) {
+        currentAccountIndex--;
+        resetScroll();
+        payrollDisplay(currentAccountIndex);
+    }
+  if (buttons & BUTTON_DOWN && currentAccountIndex < accountCount - 1) {
+        currentAccountIndex++;
+        resetScroll();
+        payrollDisplay(currentAccountIndex);
+    }
+  if (buttons & BUTTON_SELECT) {
+        if (selectButtonHeldTime == 0) {
+            selectButtonHeldTime = millis(); 
+        }
+        if (millis() - selectButtonHeldTime > holdDuration && !showStudentID) {
+            // If Select button is held for more than 1 second and not already showing student ID
+            showStudentID = true;
+            lcd.clear();
+            lcd.setBacklight(5); // Purple backlight
+            lcd.setCursor(0, 0);
+            lcd.print("F423612"); 
+            lcd.setCursor(0, 1);
+            
+        }
+  }else {
+    if (showStudentID){
+      showStudentID = false;  // Returns to previous state
+      payrollDisplay(currentAccountIndex);
+    }
+    selectButtonHeldTime = 0; // Resets the timing
+  }
+  if (!showStudentID) {
+        if (!syncComplete) {
+            sendR();
+        } else {
+            processSerialCommands();
+            scrollJobTitle();
+        }
+  }
+
+}
+void resetScroll() {
+    offset = 0;
+    scrollTime = millis();
+    if (currentAccountIndex < accountCount) {
+        currentJobTitle = accounts[currentAccountIndex].jobTitle;
+    }
+}
+void scrollJobTitle(){
+  if (millis() - scrollTime >= scrollDelay) {
+        scrollTime = millis();
+
+        if (currentJobTitle.length() > 8) {
+            offset++;
+            if (offset > currentJobTitle.length()) {
+                offset = 0;
+            }
+
+            // Creates the scrolling substring
+            String displayTitle = currentJobTitle.substring(offset);
+            if (displayTitle.length() < 8) {
+                // Append the beginning of the title to create a smoother scroll
+                displayTitle += currentJobTitle.substring(0, 8 - displayTitle.length());
+            }
+
+            // Update only the job title on the display
+            lcd.setCursor(9, 1);
+            lcd.print(displayTitle);
+        }
+    }
+}
+
+void sendR(){
+
+  unsigned long currentTime = millis();
+// Checks if 2 seconds has passed then sends R
+  if( currentTime - Rtiming >=2000) { 
+
+    Serial.print("R"); 
+
+    Rtiming = currentTime;
+  }
+  if (Serial.available()) {
+        String input = Serial.readStringUntil('\n');
+        if (input == "BEGIN") {
+            syncComplete = true;
+            Serial.println("UDCHARS, SCROLL");
+            lcd.setBacklight(7); //sets backlight to white
+            
+        } 
+        else {
+            Serial.println(F("ERROR: BEGIN not received"));
+        }
+    }
+
+}
+void processSerialCommands() {
+    if (Serial.available()) {
+        String input = Serial.readStringUntil('\n');  // Read the incoming message until newline
+        input.trim();
+        Serial.println("DEBUG: Received command: " + input);
+
+
+        if (input.startsWith("ADD-")) {
+            handleADDcommand(input);
+        }
+        else if (input.startsWith("PST-")) {
+          handlePSTcommand(input);
+        }
+        else if (input.startsWith("GRD-")){
+          handleGRDcommand(input);
+        }
+        else if (input.startsWith("SAL-")) {
+          handleSALcommand(input);
+        }
+        else if (input.startsWith("CJT-")) {
+          handleCJTcommand(input);
+        }
+        else if (input.startsWith("DEL-")) {
+          handleDELcommand(input);
+        }
+          
+        
+        else {
+            Serial.println("ERROR: Unrecognized command");
+       }
+       
+    }
+}
+
+void handleADDcommand(String input) {
+    // Checks initial format
+    if (!input.startsWith("ADD-")) {
+        Serial.println(F("ERROR: Malformed ADD command - Missing 'ADD-' prefix"));
+        return;
+    }
+    input = input.substring(4);
+
+
+    // detects the dash position
+    int firstDash = input.indexOf('-');
+    int secondDash = input.indexOf('-', firstDash + 1);
+
+
+    // If any dash is missing or misplaced, it is treated as an error
+    if (firstDash == -1 || secondDash == -1 ){
+        Serial.println(F("ERROR: Malformed ADD command"));
+        return;
+    }
+
+    String ID = input.substring(0, firstDash);
+    String jobGradeStr = input.substring(firstDash + 1, secondDash);
+    String jobTitle = input.substring(secondDash + 1);
+
+    // Validates ID (must be 7 digits)
+    if (ID.length() != 7 || !isDigits(ID)) {
+        Serial.println(F("ERROR: Invalid ID in ADD command (must be 7 digits)"));
+        return;
+    }
+
+    // Validates job grade (1-9)
+    int jobGrade = jobGradeStr.toInt();
+    if (jobGrade < 1 || jobGrade > 9) {
+        Serial.println(F("ERROR: Invalid grade in ADD command (must be between 1 and 9)"));
+        return;
+    }
+
+    // Validates Job Title (3-17 characters, A-Z, 0-9, and '.')
+    if (jobTitle.length() < 3 || jobTitle.length() > 18 || !isValidJobTitle(jobTitle)) {
+        Serial.println(F("ERROR: Invalid job title in ADD command (3-17 characters, A-Z, 0-9)"));
+        return;
+    }
+
+    // Check if  the account already exists
+    if (accountExists(ID)) {
+        Serial.println(F("ERROR: Account with this ID already exists"));
+        return;
+    }
+
+    // Add new account it passes all validations
+    if (accountCount < MAX_ACCOUNTS) {
+        accounts[accountCount].ID = ID;
+        accounts[accountCount].jobGrade = jobGrade;
+        accounts[accountCount].jobTitle = jobTitle;
+        accounts[accountCount].salary = 0.00;         // Starting salary
+        accounts[accountCount].pensionStat = "PEN"; // Default pension status
+        accountCount++;
+
+        sortAccountsByID();
+
+        Serial.println(F("DONE! Account added"));
+        payrollDisplay(accountCount - 1);
+    } else {
+        Serial.println(F("ERROR: Account storage is full"));
+    }
+}
+
+void handlePSTcommand(String input){
+  input.trim();
+  
+  if (!input.startsWith("PST-")) {
+        Serial.println(F("ERROR: Malformed PST command - Missing 'PST-' prefix"));
+        return;
+    }
+    input = input.substring(4);
+
+    
+    // Split the command into parts by dashes
+    int firstDash = input.indexOf('-');
+    if (firstDash == -1) {
+        Serial.println(F("ERROR: Malformed PST command (missing dashes)"));
+        return;
+    }
+
+    String ID = input.substring(0, firstDash);
+    String newStat = input.substring(firstDash + 1);
+
+    
+    //Serial.println("DEBUG: Parsed ID: " + ID);
+    //Serial.println("DEBUG: Parsed Status: " + newStat);
+
+    if (ID.length() != 7 || !isDigits(ID)) {
+        Serial.println(F("ERROR: Invalid ID in GRD command (must be 7 digits)"));
+        return;
+    }
+    
+    if (newStat != "PEN" && newStat != "NPEN") {
+        Serial.println(F("ERROR: Invalid pension status (must be PEN or NPEN)"));
+        return ;
+    }
+     for (int i = 0; i < accountCount; i++) {
+        if (accounts[i].ID == ID) {
+            // Check if the current status is already the same as the new status
+            if (accounts[i].pensionStat == newStat) {
+                Serial.println(F("ERROR: Pension status not changed"));
+                return;
+            }
+
+            // Ensure employee has a salary > 0 before allowing status change
+            if (accounts[i].salary == 0) {
+                Serial.println(F("ERROR: Cannot change pension status, salary is £0.00"));
+                return;
+            }
+    
+            accounts[i].pensionStat = newStat;
+            Serial.println(F("DONE! Pension status updated successfully"));
+            payrollDisplay(i);
+            return;
+        }
+     }
+     Serial.println(F("ERROR: Employee ID not found"));
+   //  return false;
+}
+void handleGRDcommand(String input) {
+  input.trim();
+  if (!input.startsWith("GRD-")) {
+        Serial.println(F("ERROR: Malformed GRD command - Missing 'GRD-' prefix"));
+        return;
+    }
+    input = input.substring(4);
+    int firstDash = input.indexOf('-');
+    if (firstDash == -1) {
+        Serial.println(F("ERROR: Malformed GRD command (missing dashes)"));
+        return;
+    }
+
+    String ID = input.substring(0, firstDash);
+    String newJobGradeStr = input.substring(firstDash + 1);
+    int newJobGrade = newJobGradeStr.toInt();
+
+    // Debugging: print the extracted ID and newStat
+   // Serial.println("DEBUG: Parsed ID: " + ID);
+    //Serial.println("DEBUG: Parsed Status: " + String(newJobGrade));
+
+    if (ID.length() != 7 || !isDigits(ID)) {
+        Serial.println(F("ERROR: Invalid ID in GRD command (must be 7 digits)"));
+        return;
+    }
+    if (newJobGrade < 1 || newJobGrade > 9) {
+      Serial.println(F("ERROR: Invalid grade in GRD command (must be between 1 and 9)"));
+      return;
+  }
+    for (int i = 0; i < accountCount; i++) {
+      if (accounts[i].ID == ID) {
+            // Check if the current status is already the same as the new status
+            if (accounts[i].jobGrade == newJobGrade){ 
+                Serial.println(F("ERROR: job Grade not changed"));
+                return;
+            }
+
+    
+            accounts[i].jobGrade = newJobGrade;
+            Serial.println(F("DONE! Job Grade updated successfully"));
+            payrollDisplay(i);
+            return;
+      }
+    }
+    Serial.println(F("ERROR: Employee ID not found"));
+   
+}
+
+void handleSALcommand(String input) {
+  input.trim();
+  if (!input.startsWith("SAL-")) {
+        Serial.println(F("ERROR: Malformed SAL command - Missing 'SAL-' prefix"));
+        return;
+    }
+    input = input.substring(4);
+    int firstDash = input.indexOf('-');
+    if (firstDash == -1) {
+        Serial.println(F("ERROR: Malformed SAL command (missing dashes)"));
+        return;
+    }
+
+    String ID = input.substring(0, firstDash);
+    String newSalaryStr = input.substring(firstDash + 1);
+    float newSalary = newSalaryStr.toFloat();
+
+
+    if (ID.length() != 7 || !isDigits(ID)) {
+        Serial.println(F("ERROR: Invalid ID in SAL command (must be 7 digits)"));
+        return;
+    }
+    if (newSalary < 0.00 || newSalary > 99999.99) {
+      Serial.println(F("ERROR: Invalid salary in SAL command (must be between 0.00 and 99999.99)"));
+      return;
+  }
+    for (int i = 0; i < accountCount; i++) {
+      if (accounts[i].ID == ID) {
+            // Checks if the current status is already the same as the new status
+            if (accounts[i].salary == newSalary){ 
+                Serial.println(F("ERROR: salary not changed"));
+                return;
+            }
+
+    
+    
+            accounts[i].salary = newSalary;
+            Serial.println(F("DONE ! Salary updated successfully"));
+            payrollDisplay(i);
+            return;
+      }
+    }
+    Serial.println(F("ERROR: Employee ID not found"));
+   
+}
+
+void handleCJTcommand(String input) {
+  input.trim();
+  if (!input.startsWith("CJT-")) {
+        Serial.println(F("ERROR: Malformed CJT command - Missing 'CJT-' prefix"));
+        return;
+    }
+    input = input.substring(4);
+    int firstDash = input.indexOf('-');
+    if (firstDash == -1) {
+        Serial.println(F("ERROR: Malformed CJT command (missing dashes)"));
+        return;
+    }
+
+    String ID = input.substring(0, firstDash);
+    String newJobTitle = input.substring(firstDash + 1);
+   
+    // Debugging: print the extracted ID and newStat
+    //Serial.println("DEBUG: Parsed ID: " + ID);
+    //Serial.println("DEBUG: Parsed Status: " + String(newJobTitle));
+
+    if (ID.length() != 7 || !isDigits(ID)) {
+        Serial.println(F("ERROR: Invalid ID in CJT command (must be 7 digits)"));
+        return;
+    }
+    if (newJobTitle.length() < 3 || newJobTitle.length() > 18) {
+      Serial.println(F("ERROR: Invalid job Title (must be between 3 and 17 letters)"));
+      return;
+  }
+    for (int i = 0; i < accountCount; i++) {
+      if (accounts[i].ID == ID) {
+            // Check if the current status is already the same as the new status
+            if (accounts[i].jobTitle == newJobTitle){ //|| accounts[i].jobGrade > newJobGrade ) {
+                Serial.println(F("ERROR: job title not changed"));
+                return;
+            }
+
+    
+    
+            accounts[i].jobTitle = newJobTitle;
+            Serial.println(F("DONE! Job title updated successfully"));
+            payrollDisplay(i);
+            return;
+      }
+    }
+    Serial.println(F("ERROR: Employee ID not found"));
+   // return false;
+}
+void handleDELcommand(String input) {
+  input.trim();
+  if (!input.startsWith("DEL-")) {
+        Serial.println(F("ERROR: Malformed DEL command - Missing 'DEL-' prefix"));
+        return;
+    }
+    
+    String ID = input.substring(4);
+
+    if (ID.length() != 7 || !isDigits(ID)) {
+        Serial.println(F("ERROR: Invalid ID in DEL command (must be 7 digits)"));
+        return;
+    }
+    
+    // Search for the matching account
+    int deleteIndex = -1;
+    for (int i = 0; i < accountCount; i++) {
+        if (accounts[i].ID == ID) {
+            deleteIndex = i;
+            break;
+        }
+    }
+
+
+    if (deleteIndex == -1) {
+        Serial.println(F("ERROR: Employee ID not found"));
+        return;
+    }
+
+    // Deletes the account by shifting the accounts up
+    for (int i = deleteIndex; i < accountCount - 1; i++) {
+        accounts[i] = accounts[i + 1];
+    }
+    accountCount--; 
+
+   
+    Serial.println(F("DONE!: Account deleted"));
+
+    if (accountCount > 0) {
+      payrollDisplay(currentAccountIndex);
+}   else {
+      lcd.clear();
+      lcd.print(F("No accounts"));
+}
+   
+
+    Serial.println(F("DONE! Account deleted"));
+}
+
+bool isDigits(String str) {
+    for (int i = 0; i < str.length(); i++) {
+        if (!isDigit(str[i])) return false;
+    }
+    return true;
+}
+bool isValidJobTitle(String jobTitle) {
+    for (int i = 0; i < jobTitle.length(); i++) {
+        char c = jobTitle[i];
+        if (!(isAlphaNumeric(c) || c == '.')) return false;
+        if (c=='-') return false;
+    }
+    return true;
+}
+bool accountExists(String ID) {
+    for (int i = 0; i < accountCount; i++) {
+        if (accounts[i].ID == ID) {
+          return true;
+        }
+    }
+    return false;
+}
+void sortAccountsByID() {
+    for (int i = 0; i < accountCount - 1; i++) {
+        for (int j = i + 1; j < accountCount; j++) {
+            if (accounts[i].ID.toInt() > accounts[j].ID.toInt()) {  // converts ID string to an integer
+                payrollAccount temp = accounts[i];
+                accounts[i] = accounts[j];  // swaps their positions
+                accounts[j] = temp;
+            }
+        }
+    }
+}
+
+void payrollDisplay(int accountIndex){
+  lcd.clear();
+
+    if (accountIndex < 0 || accountIndex >= accountCount) {
+        lcd.print(F("ERROR: No accounts"));
+        return;
+    }
+
+    payrollAccount account = accounts[accountIndex];
+    
+
+    // Set backlight color based on pension status
+    if (account.pensionStat == "PEN") {
+        lcd.setBacklight(2); // Green
+    } else {
+        lcd.setBacklight(1); // Red
+    }
+    lcd.createChar(0, upArrow);
+    lcd.createChar(1, downArrow);
+
+    
+    lcd.setCursor(0, 0);
+    if (accountIndex > 0) lcd.write((uint8_t)0);
+    else lcd.print(" ");
+
+   
+    lcd.print(account.jobGrade);
+    lcd.print(" ");
+    lcd.print(account.pensionStat);
+
+    
+
+    
+    lcd.setCursor(0, 1);
+    if (accountIndex < accountCount - 1) lcd.write((uint8_t)1);
+    else lcd.print(" ");
+    lcd.print(account.ID);
+    lcd.print(" ");
+   
+    // Stores the current job title for scrolling
+    currentJobTitle = account.jobTitle;
+
+    // Displays the job title (first 8 characters initially)
+    lcd.setCursor(9, 1);
+    if (currentJobTitle.length() > 8) {
+        lcd.print(currentJobTitle.substring(0, 8));
+    } else {
+        lcd.print(currentJobTitle);
+    }
+    
+
+    lcd.setCursor(8, 0);
+    lcd.print(account.salary, 2);
+ 
+    
+ 
+}
