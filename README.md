@@ -23,6 +23,15 @@ The goal of this project was to explore hardware–software integration, input v
 * Serial command interface for system control
 
 ---
+## 🛠 Technologies Used
+
+- **Language:** C++ (Arduino)
+- **Platform:** Arduino IDE / Arduino framework
+- **Libraries:**
+  - Wire
+  - Adafruit_RGBLCDShield
+  - Adafruit_MCP23017
+- **Hardware:** Arduino microcontroller with Adafruit RGB LCD Shield
 
 ## Hardware Used
 
